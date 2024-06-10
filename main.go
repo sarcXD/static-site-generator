@@ -6,20 +6,29 @@ package main
 what it is I am doing and why that is undefined behavior. I hate that markdown can be written on a whim
 and you don't even know what you did incorrectly
 - md conversion
-	* italic
-	* bold
-	* italic bold
 	* link
 	* ul
 	* ol
 	* table
 - custom header
 - custom components
+@improvements:
+- handle paragraph closing when file ends, currently im relying on browsers to clean that up automatically
+- handle cleaning up double spaces when trying to make a line space, such that only a single line space is created
 */
 
 /*
-@resume:
-- working on italic and bold formattings. That is completely broken right now
+@progress:
+*/
+
+/*
+@done:
+- header
+- paragraphs
+- linebreaks
+- italic
+- bold
+- italic bold
 */
 
 import (
@@ -42,29 +51,44 @@ type pathState struct {
 }
 
 // this will be a sort of a state machine
+// the elements at top have higher priority and
+// can contain elements that fall below. As an example
+// - A header is singular and no other element will have it
+// - When processing lists, they can have all the elements that fall below
+// note: this might be slightly confusing because of the MdHeader not containing any other element,
+// rest assured, that is the outlier here.
 const (
 	MdNone   = iota + 0
+	MdCustom // custom component
 	MdHeader // h1 to h4
 	MdHeaderText
-	MdItalic     // italic
-	MdBold       // bold
-	MdItalicBold // italic bold
-	MdLink       // link
-	MdUl         // unordered list
-	MdOl         // ordered list
-	MdCustom     // custom component
+	MdPara         // paragraph
+	MdElementStart // Start marker for nestable elements
+	MdUl           // unordered list
+	MdOl           // ordered list
+	MdItalic       // italic
+	MdBold         // bold
+	MdItalicBold   // italic bold
+	MdLink         // link
+	MdText         // Normal text
+	MdElementEnd   // End marker for nestable elements
 	// ------ past this range we have the text buffers, where should the state be that, we will clear the respective buffer
 	// and write it's data to the output file
 	MdBufferFlushHeader
+	MdBufferFlushItalicBold
 )
 
 const (
 	IBNone = iota + 0
 	IBStart
-	IBStartDone
+	IBWriting
 	IBEnd
-	IBEndDone
+	IBFinish
 )
+
+type State interface {
+	flush_tag()
+}
 
 type convState struct {
 	eval_type int
@@ -73,20 +97,37 @@ type convState struct {
 	// header stuff
 	headerInd    int
 	hTokenBuffer string
+	// paragraph stuff
+	paraBegin    bool
+	paraEnd      bool
+	newlineCount int
+	// linebreak stuff
+	isLineBreak bool
+	spaceCount  int
 	// italic and bold stuff
-	ib_eval        int
-	italicBoldOpen bool
-	ibTokenBuffer  string
+	ibIndStart    int
+	ibIndEnd      int
+	ibEval        int
+	ibTokenBuffer string
+	// parsing tracking
+	posline int
+	poscol  int
 }
 
 var hMap []string = []string{"h1", "h2", "h3", "h4", "h5"}
+var paraMap []string = []string{"<p>", "</p>"}
 var italicBoldMap [][]string = [][]string{{"<i>", "</i>"}, {"<b>", "</b>"}, {"<i><b>", "</b></i>"}}
+
+func (state convState) flush_tag(flushType int) {
+	state.eval_type = flushType
+}
 
 func process_md_file(file string) string {
 	var out_file string
-	var state convState = convState{eval_type: MdNone, ib_eval: IBNone}
+	var state convState = convState{eval_type: MdNone, posline: 0, poscol: 0}
 	state.lineBegin = true
 	for _, ch := range file {
+		wroteText := false
 		ignoreWrite := false
 		isLineBegin := false
 		state.skipWrite = false
@@ -113,37 +154,69 @@ func process_md_file(file string) string {
 			state.hTokenBuffer += string(ch)
 			ignoreWrite = true
 		case '*':
-			if false {
+			switch state.eval_type {
+			case MdNone:
+				state.eval_type = MdItalic
 				state.ibTokenBuffer += string(ch)
-				if state.ib_eval == IBNone {
-					state.ib_eval = IBStart
-				} else if state.ib_eval == IBStartDone {
-					state.ib_eval = IBEnd
+				state.ibIndStart = 0
+				state.ibEval = IBStart
+			case MdItalic:
+				if state.ibEval == IBStart {
+					state.eval_type = MdBold
+					state.ibIndStart += 1
+				} else if state.ibEval == IBWriting {
+					state.ibEval = IBFinish
+					state.ibIndEnd = 0
+				} else {
+					state.eval_type = MdBufferFlushItalicBold
+				}
+				state.ibTokenBuffer += string(ch)
+			case MdBold:
+				if state.ibEval == IBStart {
+					state.eval_type = MdItalicBold
+					state.ibIndStart += 1
+				} else if state.ibEval == IBWriting {
+					state.ibEval = IBEnd
+					state.ibIndEnd = 0
+				} else if state.ibEval == IBEnd {
+					state.ibIndEnd += 1
+					state.ibEval = IBFinish
+				} else {
+					state.eval_type = MdBufferFlushItalicBold
+				}
+				state.ibTokenBuffer += string(ch)
+			case MdItalicBold:
+				if state.ibEval == IBWriting {
+					state.ibEval = IBEnd
+					state.ibIndEnd = 0
+				} else if state.ibEval == IBEnd {
+					state.ibIndEnd += 1
+				} else {
+					state.eval_type = MdBufferFlushItalicBold
 				}
 
-				if state.eval_type == MdNone {
-					state.eval_type = MdItalic
-				} else if state.eval_type >= MdItalic && state.eval_type < MdItalicBold {
-					state.eval_type += 1
+				if state.ibIndEnd == 2 {
+					state.ibEval = IBFinish
+				} else if state.ibIndEnd > 2 {
+					// this is an error case (****)
+					state.eval_type = MdBufferFlushItalicBold
 				}
-				state.skipWrite = true
+			default:
+				// do nothing
 			}
+			ignoreWrite = true
 		case ' ':
 			switch state.eval_type {
 			case MdHeader:
 				out_file += "<" + hMap[state.headerInd] + ">"
 				state.eval_type = MdHeaderText
 				ignoreWrite = true
-			case MdNone:
-			default:
-				fmt.Printf("Warning, state.eval_type value = %d, has no handling for space operator/character \n", state.eval_type)
-			}
-			if false {
-				if state.ib_eval == IBStart {
-					// ** xyz.. |=> this is not valid as we need the characters right besides the asterisk for a valid italic bold command
-					out_file += state.ibTokenBuffer
-					state.ib_eval = IBNone
+			case MdItalic, MdBold, MdItalicBold:
+				if state.ibEval == IBStart || state.ibEval == IBEnd {
+					state.eval_type = MdBufferFlushItalicBold
 				}
+			default:
+				state.spaceCount += 1
 			}
 		case '\n':
 			switch state.eval_type {
@@ -151,8 +224,16 @@ func process_md_file(file string) string {
 				out_file += "</" + hMap[state.headerInd] + ">"
 				state.eval_type = MdNone
 				state.headerInd = 0
+				state.paraBegin = true
 			default:
-				// do nothing
+				if state.spaceCount == 2 {
+					state.isLineBreak = true
+					state.spaceCount = 0
+				}
+				state.newlineCount += 1
+			}
+			if state.newlineCount == 2 {
+				state.paraEnd = true
 			}
 			isLineBegin = true
 		default:
@@ -163,24 +244,48 @@ func process_md_file(file string) string {
 				// the valid state would be MdHeaderBuffer
 				// in this case we will set the state to MdBufferFlushHeader
 				state.eval_type = MdBufferFlushHeader
-			default:
-				fmt.Printf("Warning, state.eval_type value = %d, has no handling for new line operator/character \n", state.eval_type)
-			}
-			if false {
-				if state.eval_type >= MdItalic && state.eval_type <= MdItalicBold {
-					ind := state.eval_type - MdItalic
-					if !state.italicBoldOpen {
-						out_file += italicBoldMap[ind][0]
-						state.italicBoldOpen = true
-						state.ib_eval = IBStartDone
-					} else {
-						out_file += italicBoldMap[ind][1]
-						state.italicBoldOpen = false
-						state.ib_eval = IBEndDone
-					}
-					state.eval_type = MdNone
+			case MdItalic, MdBold, MdItalicBold:
+				if state.ibEval == IBStart {
+					out_file += italicBoldMap[state.ibIndStart][0]
+					state.ibEval = IBWriting
 					state.ibTokenBuffer = ""
 				}
+			default:
+				wroteText = true
+			}
+		}
+		// Explicit Writing
+		// In certain cases, the state is set, and now we need to write the relevant tags
+		// This section handles that
+		if (state.eval_type > MdNone &&
+			state.eval_type < MdElementEnd) || wroteText {
+			state.spaceCount = 0
+			state.newlineCount = 0
+		}
+		// --- linebreak
+		if state.isLineBreak {
+			out_file += "<br>"
+			state.isLineBreak = false
+		}
+		// --- paragraph
+		if state.paraBegin {
+			out_file += paraMap[0]
+			state.paraBegin = false
+		}
+		if state.paraEnd {
+			out_file += paraMap[1]
+			state.paraEnd = false
+			state.paraBegin = true
+		}
+		// --- italic, bold, italic bold
+		if state.eval_type == MdItalic ||
+			state.eval_type == MdBold ||
+			state.eval_type == MdItalicBold {
+			if state.ibEval == IBFinish {
+				out_file += italicBoldMap[state.ibIndEnd][1]
+				state.ibEval = IBNone
+				state.eval_type = MdNone
+				state.ibTokenBuffer = ""
 			}
 		}
 		// flush_token_buffer
@@ -192,6 +297,13 @@ func process_md_file(file string) string {
 			case MdBufferFlushHeader:
 				out_file += state.hTokenBuffer
 				state.hTokenBuffer = ""
+				log.Printf("ParsingError :: Invalid header format at line %d, col %d", state.posline, state.poscol)
+			case MdBufferFlushItalicBold:
+				out_file += state.ibTokenBuffer
+				state.ibTokenBuffer = ""
+				state.ibIndStart = 0
+				state.ibEval = IBNone
+				log.Printf("ParsingError :: Invalid italic/bold/italic bold format at line %d, col %d", state.posline, state.poscol)
 			default:
 				log.Printf("Warning, state.eval_type value = %d, has no buffer flush\n", state.eval_type)
 			}
@@ -200,6 +312,10 @@ func process_md_file(file string) string {
 		state.lineBegin = isLineBegin
 		if !ignoreWrite {
 			out_file += string(ch)
+		}
+		if state.lineBegin {
+			state.posline += 1
+			state.poscol = 0
 		}
 	}
 
@@ -273,5 +389,5 @@ func main() {
 
 	process(*srcDirPtr, *dstDirPtr)
 
-	println("finished reading root directory")
+	fmt.Println("finished reading root directory")
 }

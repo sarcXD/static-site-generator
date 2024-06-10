@@ -1,20 +1,27 @@
 # Breaking my Quasi Gen/S^4 Gen/StupidSimpleStaticSite Gen
 #Incorrect header
-Trying out weird combinations of features and will eventually have to fix them.
+Trying out weird combinations of features and 
+this line break here and  
+will eventually have to fix them.
+
+sample para
+
 **bold here**, *italic here*, `some code here`  
-* this should not work*
-** neither should this*
-**newling gives us weird behaviors**
-we got a list, engarde:
+* this should not work* <space>
+** neither should this* <space>
+***italic bold here***
+**will newling gives us weird behaviors
+or will it**
+we got a list, engarde:  
 - *italic*  
 - **bold**  
 - *gotcha  
-- and here too *asd  
+- and here too* asd  
 - `just code`  
 - *`just code`*  
 - No `code here`  
 - **`bold code`** yo dog what is this  
-- [Wrong link Test Page 1](./2023/QSG_BREAK.md  
+- [Wrong link Test Page 1](./2023/QSG_BREAK.md) 
 - [Wrong link Test Page 1(123)  
 trying bold  
 
@@ -47,3 +54,5 @@ testing an ordered list here:
 2. testing 2
 3. testing 3
 4. testing 4
+and thats that
+

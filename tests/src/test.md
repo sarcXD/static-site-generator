@@ -1,5 +1,13 @@
 # Breaking my Quasi Gen/S^4 Gen/StupidSimpleStaticSite Gen
 #Incorrect header
+## here is a 2nd header
+## here is a header with a # character, this should be fine
+### h3
+#### h4
+##### h5
+###### h6
+###### h6 with a multicombination # # and  ###
+####### h7
 Trying out weird combinations of features and 
 this line break here and  
 will eventually have to fix them.
@@ -24,6 +32,7 @@ we got a list, engarde:
 - [Wrong link Test Page 1](./2023/QSG_BREAK.md) 
 - [Wrong link Test Page 1(123)  
 trying bold  
+
 
 
 ```
@@ -56,3 +65,6 @@ testing an ordered list here:
 4. testing 4
 and thats that
 
+
+this needs to close though,
+a check for the lack of a new line

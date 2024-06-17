@@ -1,34 +1,32 @@
 package main
 
 /*
-@todo:
+@important:
 - add error validation, so whenever I am doing something undefined, I raise an error informing in detail,
 what it is I am doing and why that is undefined behavior. I hate that markdown can be written on a whim
 and you don't even know what you did incorrectly
+
+@todo:
+---
+- text formatting
+-- italic
+-- bold
+-- italicBold
 - md conversion
 	* link
 	* ul
 	* ol
-	* table
+- table? (probably a custom table)
 - custom header
 - custom components
+
 @improvements:
-- handle paragraph closing when file ends, currently im relying on browsers to clean that up automatically
-- handle cleaning up double spaces when trying to make a line space, such that only a single line space is created
-*/
-
-/*
 @progress:
-*/
-
-/*
+- text formatting
 @done:
-- header
+- headings
 - paragraphs
-- linebreaks
-- italic
-- bold
-- italic bold
+- linebreak
 */
 
 import (
@@ -61,263 +59,230 @@ const (
 	MdNone   = iota + 0
 	MdCustom // custom component
 	MdHeader // h1 to h4
-	MdHeaderText
-	MdPara         // paragraph
-	MdElementStart // Start marker for nestable elements
-	MdUl           // unordered list
-	MdOl           // ordered list
-	MdItalic       // italic
-	MdBold         // bold
-	MdItalicBold   // italic bold
-	MdLink         // link
-	MdText         // Normal text
-	MdElementEnd   // End marker for nestable elements
+	MdPara
+	MdElement // Start marker for nestable elements
 	// ------ past this range we have the text buffers, where should the state be that, we will clear the respective buffer
 	// and write it's data to the output file
+	MdFlushWrite
+	MdFlushError
 	MdBufferFlushHeader
 	MdBufferFlushItalicBold
 )
 
 const (
-	IBNone = iota + 0
-	IBStart
-	IBWriting
-	IBEnd
-	IBFinish
+	wMDNone = iota + 0
+	wMDHeader
 )
 
-type State interface {
-	flush_tag()
-}
+// header parsing state
+const (
+	hStart = iota + 0
+	hText
+	hWrite
+)
+
+// italic bold type
+const (
+	IBItalic = iota + 0
+	IBBold
+	IBItalicBold
+)
+
+// italic bold parsing state
+const (
+	ibNone = iota + 0
+	ibStart
+	ibWriting
+	ibEnd
+	ibFinish
+)
+
+// link parsing state
+const (
+	linkNone = iota + 0
+	linkStart
+	linkText
+	linkUrl
+	linkFinish
+)
+
+// maybe?
+// @note: (rawBuffer)
+// this buffer writes text as if it was just normal text. This is so that when the tag I am parsing is incorrect,
+// I have the raw data available so I can write it as is.
 
 type convState struct {
-	eval_type int
+	stateEval int
 	lineBegin bool
-	skipWrite bool
-	// header stuff
-	headerInd    int
-	hTokenBuffer string
-	// paragraph stuff
+	// == header stuff ==
+	headerBufferRaw    string // if parse error: flush this buffer to out_file
+	headerBufferParsed string // if ok: flush this buffer to out file
+	headerIndex        int
+	headerEval         int
+
+	writeBuffer string
+
 	paraBegin    bool
 	paraEnd      bool
-	newlineCount int
-	// linebreak stuff
-	isLineBreak bool
-	spaceCount  int
-	// italic and bold stuff
-	ibIndStart    int
-	ibIndEnd      int
-	ibEval        int
-	ibTokenBuffer string
+	paraSurround bool
+	paraActive   bool
+
+	isSpace     bool
+	isPageBreak bool
 	// parsing tracking
 	posline int
 	poscol  int
 }
 
-var hMap []string = []string{"h1", "h2", "h3", "h4", "h5"}
+var hMap []string = []string{"h1", "h2", "h3", "h4", "h5", "h6"}
 var paraMap []string = []string{"<p>", "</p>"}
 var italicBoldMap [][]string = [][]string{{"<i>", "</i>"}, {"<b>", "</b>"}, {"<i><b>", "</b></i>"}}
 
-func (state convState) flush_tag(flushType int) {
-	state.eval_type = flushType
-}
-
 func process_md_file(file string) string {
 	var out_file string
-	var state convState = convState{eval_type: MdNone, posline: 0, poscol: 0}
+	var state convState = convState{stateEval: MdNone, posline: 0, poscol: 0}
+  out_file = "<article>\n"
 	state.lineBegin = true
-	for _, ch := range file {
-		wroteText := false
-		ignoreWrite := false
-		isLineBegin := false
-		state.skipWrite = false
+	for i := 0; i < len(file); i++ {
+		isSpace := false
+		lineBegin := false
+		ch := string(file[i])
 		switch ch {
-		case '#':
-			// If the line has just begun, we will process the hash character
-			if state.lineBegin {
-				if state.eval_type != MdHeader {
-					// if we are starting header, prepare state variables
-					state.eval_type = MdHeader
-					state.headerInd = 0
-					state.hTokenBuffer = ""
-				} else if state.headerInd < len(hMap)-1 {
-					// else increment the header index index
-					state.headerInd++
+		case "#":
+			if state.stateEval == MdNone && state.lineBegin {
+				state.stateEval = MdHeader
+				state.headerBufferParsed = ""
+				state.headerBufferRaw = ""
+				state.headerIndex = 0
+				state.headerEval = hStart
+			} else if state.stateEval == MdHeader {
+				if state.headerEval == hStart {
+					if state.headerIndex >= len(hMap)-1 {
+						state.stateEval = MdBufferFlushHeader
+					} else {
+						state.headerIndex += 1
+					}
 				} else {
-					// incase we exceed the header index, that is no longer a valid header
-					// reset header state in that case
-					state.eval_type = MdBufferFlushHeader
+					state.headerBufferParsed += ch
 				}
 			}
-			// we'll let it fall through to the hTokenBuffer
-			// this will help us deal with the cases where it is supposed to be treated as normal text
-			state.hTokenBuffer += string(ch)
-			ignoreWrite = true
-		case '*':
-			switch state.eval_type {
-			case MdNone:
-				state.eval_type = MdItalic
-				state.ibTokenBuffer += string(ch)
-				state.ibIndStart = 0
-				state.ibEval = IBStart
-			case MdItalic:
-				if state.ibEval == IBStart {
-					state.eval_type = MdBold
-					state.ibIndStart += 1
-				} else if state.ibEval == IBWriting {
-					state.ibEval = IBFinish
-					state.ibIndEnd = 0
+			state.headerBufferRaw += ch
+		case " ":
+      isSpace = true
+			if state.stateEval == MdHeader {
+				if state.headerEval == hStart {
+					state.headerEval = hText
+					state.headerBufferParsed += "<" + hMap[state.headerIndex] + ">"
 				} else {
-					state.eval_type = MdBufferFlushItalicBold
+					state.headerBufferParsed += ch
 				}
-				state.ibTokenBuffer += string(ch)
-			case MdBold:
-				if state.ibEval == IBStart {
-					state.eval_type = MdItalicBold
-					state.ibIndStart += 1
-				} else if state.ibEval == IBWriting {
-					state.ibEval = IBEnd
-					state.ibIndEnd = 0
-				} else if state.ibEval == IBEnd {
-					state.ibIndEnd += 1
-					state.ibEval = IBFinish
+				state.headerBufferRaw += ch
+			} else {
+				if state.isSpace {
+					state.isPageBreak = true
 				} else {
-					state.eval_type = MdBufferFlushItalicBold
+					state.writeBuffer += ch
 				}
-				state.ibTokenBuffer += string(ch)
-			case MdItalicBold:
-				if state.ibEval == IBWriting {
-					state.ibEval = IBEnd
-					state.ibIndEnd = 0
-				} else if state.ibEval == IBEnd {
-					state.ibIndEnd += 1
+				state.stateEval = MdFlushWrite
+			}
+		case "\n":
+			lineBegin = true
+			if state.stateEval == MdHeader {
+				if state.headerEval == hStart {
+					state.headerEval = MdBufferFlushHeader
 				} else {
-					state.eval_type = MdBufferFlushItalicBold
-				}
+					state.headerBufferParsed += "</" + hMap[state.headerIndex] + ">"
+					state.headerBufferParsed += ch
+					state.stateEval = MdFlushWrite
+					state.writeBuffer += state.headerBufferParsed
 
-				if state.ibIndEnd == 2 {
-					state.ibEval = IBFinish
-				} else if state.ibIndEnd > 2 {
-					// this is an error case (****)
-					state.eval_type = MdBufferFlushItalicBold
+					if state.paraActive {
+						state.paraEnd = true
+					}
 				}
-			default:
-				// do nothing
-			}
-			ignoreWrite = true
-		case ' ':
-			switch state.eval_type {
-			case MdHeader:
-				out_file += "<" + hMap[state.headerInd] + ">"
-				state.eval_type = MdHeaderText
-				ignoreWrite = true
-			case MdItalic, MdBold, MdItalicBold:
-				if state.ibEval == IBStart || state.ibEval == IBEnd {
-					state.eval_type = MdBufferFlushItalicBold
+				state.headerBufferRaw += ch
+			} else {
+				if state.lineBegin {
+					// we have a double line.
+					// close the paragraph
+					if state.paraActive {
+						state.paraEnd = true
+					}
+				} else {
+					state.writeBuffer += ch
 				}
-			default:
-				state.spaceCount += 1
 			}
-		case '\n':
-			switch state.eval_type {
-			case MdHeaderText:
-				out_file += "</" + hMap[state.headerInd] + ">"
-				state.eval_type = MdNone
-				state.headerInd = 0
-				state.paraBegin = true
-			default:
-				if state.spaceCount == 2 {
-					state.isLineBreak = true
-					state.spaceCount = 0
-				}
-				state.newlineCount += 1
-			}
-			if state.newlineCount == 2 {
-				state.paraEnd = true
-			}
-			isLineBegin = true
 		default:
-			// in case we have to write normal text handle each case accordingly
-			switch state.eval_type {
-			case MdHeader:
-				// incase a header is active, normal text is not valid before a ' ' character.
-				// the valid state would be MdHeaderBuffer
-				// in this case we will set the state to MdBufferFlushHeader
-				state.eval_type = MdBufferFlushHeader
-			case MdItalic, MdBold, MdItalicBold:
-				if state.ibEval == IBStart {
-					out_file += italicBoldMap[state.ibIndStart][0]
-					state.ibEval = IBWriting
-					state.ibTokenBuffer = ""
+			if state.stateEval == MdHeader {
+				if state.headerEval == hStart {
+					state.stateEval = MdBufferFlushHeader
+				} else {
+					state.headerBufferParsed += ch
 				}
-			default:
-				wroteText = true
+				state.headerBufferRaw += ch
+			}
+			if state.stateEval == MdNone {
+				if !state.paraActive {
+					state.paraBegin = true
+				}
+				state.writeBuffer += ch
+				state.stateEval = MdFlushWrite
 			}
 		}
-		// Explicit Writing
-		// In certain cases, the state is set, and now we need to write the relevant tags
-		// This section handles that
-		if (state.eval_type > MdNone &&
-			state.eval_type < MdElementEnd) || wroteText {
-			state.spaceCount = 0
-			state.newlineCount = 0
-		}
-		// --- linebreak
-		if state.isLineBreak {
-			out_file += "<br>"
-			state.isLineBreak = false
-		}
-		// --- paragraph
-		if state.paraBegin {
-			out_file += paraMap[0]
-			state.paraBegin = false
-		}
-		if state.paraEnd {
-			out_file += paraMap[1]
-			state.paraEnd = false
-			state.paraBegin = true
-		}
-		// --- italic, bold, italic bold
-		if state.eval_type == MdItalic ||
-			state.eval_type == MdBold ||
-			state.eval_type == MdItalicBold {
-			if state.ibEval == IBFinish {
-				out_file += italicBoldMap[state.ibIndEnd][1]
-				state.ibEval = IBNone
-				state.eval_type = MdNone
-				state.ibTokenBuffer = ""
-			}
-		}
-		// flush_token_buffer
-		// check if we have any buffer state
-		// buffer states mean that the buffer needs to be written to output file and cleared
-		// these states occur whenever some markdown we were parsing turns out to be invalid
-		if state.eval_type >= MdBufferFlushHeader {
-			switch state.eval_type {
+		// Error checking is done first,
+		// any data to flush is sent to write buffer
+		if state.stateEval > MdFlushError {
+			switch state.stateEval {
 			case MdBufferFlushHeader:
-				out_file += state.hTokenBuffer
-				state.hTokenBuffer = ""
-				log.Printf("ParsingError :: Invalid header format at line %d, col %d", state.posline, state.poscol)
-			case MdBufferFlushItalicBold:
-				out_file += state.ibTokenBuffer
-				state.ibTokenBuffer = ""
-				state.ibIndStart = 0
-				state.ibEval = IBNone
-				log.Printf("ParsingError :: Invalid italic/bold/italic bold format at line %d, col %d", state.posline, state.poscol)
-			default:
-				log.Printf("Warning, state.eval_type value = %d, has no buffer flush\n", state.eval_type)
+				state.writeBuffer += state.headerBufferRaw
+				state.stateEval = MdFlushWrite
+				if !state.paraActive {
+					state.paraBegin = true
+				}
+				log.Printf("Warning::Incorrect header at line %d, col %d", state.posline, state.poscol)
 			}
-			state.eval_type = MdNone
 		}
-		state.lineBegin = isLineBegin
-		if !ignoreWrite {
-			out_file += string(ch)
+
+    if state.isPageBreak {
+      out_file += "<br />"
+      state.isPageBreak = false
+    }
+		if state.paraEnd {
+			out_file += "</p>\n"
+			state.paraEnd = false
+			state.paraActive = false
 		}
+		// Check to see if any data needs flushing
+		if state.stateEval == MdFlushWrite {
+			if state.paraBegin {
+				out_file += "\n<p>"
+				state.paraBegin = false
+				state.paraActive = true
+			}
+			out_file += state.writeBuffer
+			if state.paraSurround {
+				out_file += "</p>\n"
+				state.paraSurround = false
+				state.paraActive = false
+			}
+			state.stateEval = MdNone
+			state.writeBuffer = ""
+		}
+
+		state.lineBegin = lineBegin
+		state.isSpace = isSpace
 		if state.lineBegin {
 			state.posline += 1
 			state.poscol = 0
 		}
 	}
+	// some token closing checks need to be repeated
+	// in case the file ends without a newline/double newline
+	if state.paraActive {
+		out_file += "</p>\n"
+		state.paraActive = false
+	}
+  out_file += "\n</article>"
 
 	return out_file
 }

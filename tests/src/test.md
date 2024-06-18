@@ -14,7 +14,7 @@ will eventually have to fix them.
 
 sample para
 
-**bold here**, *italic here*, `some code here`  
+*italic here*, **bold here**, `some code here`  
 * this should not work* <space>
 ** neither should this* <space>
 ***italic bold here***

@@ -8,10 +8,6 @@ and you don't even know what you did incorrectly
 
 @todo:
 ---
-- text formatting
--- italic
--- bold
--- italicBold
 - md conversion
 	* link
 	* ul
@@ -23,6 +19,9 @@ and you don't even know what you did incorrectly
 @improvements:
 @progress:
 - text formatting
+-- italic
+-- bold
+-- italicBold
 @done:
 - headings
 - paragraphs
@@ -56,54 +55,45 @@ type pathState struct {
 // note: this might be slightly confusing because of the MdHeader not containing any other element,
 // rest assured, that is the outlier here.
 const (
-	MdNone   = iota + 0
-	MdCustom // custom component
-	MdHeader // h1 to h4
-	MdPara
-	MdElement // Start marker for nestable elements
-	// ------ past this range we have the text buffers, where should the state be that, we will clear the respective buffer
-	// and write it's data to the output file
+	MdNone    = iota + 0
+	MdCustom  // custom component
+	MdHeader  // h1 to h4
+	MdElement // normal elements
+	// @note:
+	// ------ past this range we have the text buffer states
+	// MdFlushWrite: flush data to output file
+	// MdFlushError: handle error and flush the output from that (raw text) into the rawBuffer
+	// -----------------------------------------------------------
+	// SUBJECT TO CHANGE
+	// MdBufferFlush${OperatorName}: this error type points to error in a particular type of formatter
+	// and we need to handle each case usually differently.
 	MdFlushWrite
 	MdFlushError
 	MdBufferFlushHeader
 	MdBufferFlushItalicBold
 )
 
-const (
-	wMDNone = iota + 0
-	wMDHeader
-)
-
 // header parsing state
 const (
 	hStart = iota + 0
 	hText
-	hWrite
 )
 
 // italic bold type
 const (
-	IBItalic = iota + 0
-	IBBold
-	IBItalicBold
+	ibNone = iota + 0
+	ibItalic
+	ibBold
+	ibItalicBold
 )
 
 // italic bold parsing state
 const (
-	ibNone = iota + 0
-	ibStart
-	ibWriting
-	ibEnd
-	ibFinish
-)
-
-// link parsing state
-const (
-	linkNone = iota + 0
-	linkStart
-	linkText
-	linkUrl
-	linkFinish
+	ibEleNone = iota + 0
+	ibEleStart
+	ibEleWriting
+	ibEleEnd
+	ibEleFinish
 )
 
 // maybe?
@@ -129,6 +119,12 @@ type convState struct {
 
 	isSpace     bool
 	isPageBreak bool
+
+	ibEval         int
+	ibElementEval  int
+	ibBufferRaw    string
+	ibBufferParsed string
+
 	// parsing tracking
 	posline int
 	poscol  int
@@ -141,7 +137,7 @@ var italicBoldMap [][]string = [][]string{{"<i>", "</i>"}, {"<b>", "</b>"}, {"<i
 func process_md_file(file string) string {
 	var out_file string
 	var state convState = convState{stateEval: MdNone, posline: 0, poscol: 0}
-  out_file = "<article>\n"
+	out_file = "<article>\n"
 	state.lineBegin = true
 	for i := 0; i < len(file); i++ {
 		isSpace := false
@@ -167,8 +163,34 @@ func process_md_file(file string) string {
 				}
 			}
 			state.headerBufferRaw += ch
+		case "*":
+			if state.stateEval == MdNone || state.stateEval == MdElement {
+				if state.ibEval == ibNone {
+					state.stateEval = MdElement
+					state.ibEval = ibItalic
+					state.ibElementEval = ibEleStart
+					state.ibBufferRaw = ""
+					state.ibBufferParsed = ""
+				} else if state.ibEval == ibItalic {
+					if state.ibElementEval == ibEleStart {
+						state.stateEval = MdBufferFlushItalicBold
+					} else if state.ibElementEval == ibEleWriting {
+						state.ibEval = ibNone
+						state.ibElementEval = ibEleNone
+						state.ibBufferParsed += "</i>"
+						state.writeBuffer += state.ibBufferParsed
+						state.stateEval = MdFlushWrite
+						if !state.paraActive {
+							state.paraBegin = true
+						}
+					}
+				}
+				state.ibBufferRaw += ch
+			} else {
+				state.writeBuffer += ch
+			}
 		case " ":
-      isSpace = true
+			isSpace = true
 			if state.stateEval == MdHeader {
 				if state.headerEval == hStart {
 					state.headerEval = hText
@@ -180,10 +202,18 @@ func process_md_file(file string) string {
 			} else {
 				if state.isSpace {
 					state.isPageBreak = true
-				} else {
-					state.writeBuffer += ch
 				}
-				state.stateEval = MdFlushWrite
+				if state.stateEval == MdElement {
+					if state.ibEval == ibItalic {
+						state.ibBufferRaw += ch
+						state.ibBufferParsed += ch
+					}
+				} else {
+					if !state.isPageBreak {
+						state.writeBuffer += ch
+						state.stateEval = MdFlushWrite
+					}
+				}
 			}
 		case "\n":
 			lineBegin = true
@@ -202,6 +232,11 @@ func process_md_file(file string) string {
 				}
 				state.headerBufferRaw += ch
 			} else {
+				if state.ibEval > ibNone {
+					state.stateEval = MdBufferFlushItalicBold
+					state.ibBufferRaw += ch
+					state.ibBufferParsed += ch
+				}
 				if state.lineBegin {
 					// we have a double line.
 					// close the paragraph
@@ -220,6 +255,13 @@ func process_md_file(file string) string {
 					state.headerBufferParsed += ch
 				}
 				state.headerBufferRaw += ch
+			} else if state.stateEval == MdElement {
+				if state.ibEval == ibItalic && state.ibElementEval == ibEleStart {
+					state.ibElementEval = ibEleWriting
+					state.ibBufferParsed += "<i>"
+				}
+				state.ibBufferRaw += ch
+				state.ibBufferParsed += ch
 			}
 			if state.stateEval == MdNone {
 				if !state.paraActive {
@@ -240,13 +282,19 @@ func process_md_file(file string) string {
 					state.paraBegin = true
 				}
 				log.Printf("Warning::Incorrect header at line %d, col %d", state.posline, state.poscol)
+			case MdBufferFlushItalicBold:
+				state.writeBuffer += state.ibBufferRaw
+				state.stateEval = MdFlushWrite
+				state.ibEval = ibNone
+				state.ibElementEval = ibEleNone
+				log.Printf("Warning::Incorrect ib format at line %d, col %d", state.posline, state.poscol)
 			}
 		}
 
-    if state.isPageBreak {
-      out_file += "<br />"
-      state.isPageBreak = false
-    }
+		if state.isPageBreak {
+			out_file += "<br />"
+			state.isPageBreak = false
+		}
 		if state.paraEnd {
 			out_file += "</p>\n"
 			state.paraEnd = false
@@ -282,7 +330,7 @@ func process_md_file(file string) string {
 		out_file += "</p>\n"
 		state.paraActive = false
 	}
-  out_file += "\n</article>"
+	out_file += "\n</article>"
 
 	return out_file
 }

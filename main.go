@@ -1,6 +1,17 @@
 package main
 
 /*
+@glossory:
+- prefix write: this is a write we need to do before writing the currently checked element.
+This is used primarily for paragraphs closing, as writing a new element, like a header,
+usually means that we have to close a paragraph if one was being writting
+
+- postfix write: this is a write we need to do after writing the currently buffered element.
+A good example of this is a pagebreak, which can cause some buffers to be invalidated, like
+the italicBold buffer. In that case, we have to first write the entire active buffer(s) and only
+then do we write the pagebreak, else the pagebreak will be written before the active buffers,
+which will be incorrect.
+
 @important:
 - add error validation, so whenever I am doing something undefined, I raise an error informing in detail,
 what it is I am doing and why that is undefined behavior. I hate that markdown can be written on a whim
@@ -15,17 +26,16 @@ and you don't even know what you did incorrectly
 - table? (probably a custom table)
 - custom header
 - custom components
-
 @improvements:
-@progress:
-- text formatting
--- italic
--- bold
--- italicBold
+@inprogress:
 @done:
 - headings
 - paragraphs
 - linebreak
+- text formatting
+-- italic
+-- bold
+-- italicBold
 */
 
 import (
@@ -121,6 +131,8 @@ type convState struct {
 	isPageBreak bool
 
 	ibEval         int
+	ibIndexStart   int
+	ibIndexEnd     int
 	ibElementEval  int
 	ibBufferRaw    string
 	ibBufferParsed string
@@ -171,17 +183,46 @@ func process_md_file(file string) string {
 					state.ibElementEval = ibEleStart
 					state.ibBufferRaw = ""
 					state.ibBufferParsed = ""
-				} else if state.ibEval == ibItalic {
+					state.ibIndexStart = 1
+					state.ibIndexEnd = 1
+				} else if state.ibEval > ibNone {
 					if state.ibElementEval == ibEleStart {
-						state.stateEval = MdBufferFlushItalicBold
-					} else if state.ibElementEval == ibEleWriting {
-						state.ibEval = ibNone
-						state.ibElementEval = ibEleNone
-						state.ibBufferParsed += "</i>"
-						state.writeBuffer += state.ibBufferParsed
-						state.stateEval = MdFlushWrite
-						if !state.paraActive {
-							state.paraBegin = true
+						if state.ibEval == ibItalic {
+							// make state bold
+							state.ibEval = ibBold
+							state.ibIndexStart++
+							state.ibIndexEnd++
+						} else if state.ibEval == ibBold {
+							// make state italic bold
+							state.ibEval = ibItalicBold
+							state.ibIndexStart++
+							state.ibIndexEnd++
+						} else {
+							// error case
+							state.stateEval = MdBufferFlushItalicBold
+						}
+					} else if state.ibElementEval > ibEleStart {
+						if state.ibEval == ibItalic {
+							state.ibElementEval = ibEleEnd
+							state.ibIndexEnd--
+						} else if state.ibEval == ibBold {
+							state.ibElementEval = ibEleEnd
+							state.ibIndexEnd--
+						} else if state.ibEval == ibItalicBold {
+							state.ibElementEval = ibEleEnd
+							state.ibIndexEnd--
+						} else {
+							state.stateEval = MdBufferFlushItalicBold
+						}
+						if state.ibIndexEnd == 0 {
+							state.ibEval = ibNone
+							state.ibElementEval = ibEleNone
+							state.ibBufferParsed += italicBoldMap[state.ibIndexStart-1][1]
+							state.writeBuffer += state.ibBufferParsed
+							state.stateEval = MdFlushWrite
+							if !state.paraActive {
+								state.paraBegin = true
+							}
 						}
 					}
 				}
@@ -204,7 +245,10 @@ func process_md_file(file string) string {
 					state.isPageBreak = true
 				}
 				if state.stateEval == MdElement {
-					if state.ibEval == ibItalic {
+					if state.ibEval > ibNone {
+						if state.ibElementEval != ibEleWriting || state.isPageBreak {
+							state.stateEval = MdBufferFlushItalicBold
+						}
 						state.ibBufferRaw += ch
 						state.ibBufferParsed += ch
 					}
@@ -231,12 +275,11 @@ func process_md_file(file string) string {
 					}
 				}
 				state.headerBufferRaw += ch
+			} else if state.ibEval > ibNone {
+				state.stateEval = MdBufferFlushItalicBold
+				state.ibBufferRaw += ch
+				state.ibBufferParsed += ch
 			} else {
-				if state.ibEval > ibNone {
-					state.stateEval = MdBufferFlushItalicBold
-					state.ibBufferRaw += ch
-					state.ibBufferParsed += ch
-				}
 				if state.lineBegin {
 					// we have a double line.
 					// close the paragraph
@@ -256,9 +299,9 @@ func process_md_file(file string) string {
 				}
 				state.headerBufferRaw += ch
 			} else if state.stateEval == MdElement {
-				if state.ibEval == ibItalic && state.ibElementEval == ibEleStart {
+				if state.ibEval > MdNone && state.ibElementEval == ibEleStart {
 					state.ibElementEval = ibEleWriting
-					state.ibBufferParsed += "<i>"
+					state.ibBufferParsed += italicBoldMap[state.ibIndexStart-1][0]
 				}
 				state.ibBufferRaw += ch
 				state.ibBufferParsed += ch
@@ -291,10 +334,7 @@ func process_md_file(file string) string {
 			}
 		}
 
-		if state.isPageBreak {
-			out_file += "<br />"
-			state.isPageBreak = false
-		}
+		// prefix write
 		if state.paraEnd {
 			out_file += "</p>\n"
 			state.paraEnd = false
@@ -315,6 +355,11 @@ func process_md_file(file string) string {
 			}
 			state.stateEval = MdNone
 			state.writeBuffer = ""
+		}
+		if state.isPageBreak {
+			// postfix write
+			out_file += "<br />"
+			state.isPageBreak = false
 		}
 
 		state.lineBegin = lineBegin

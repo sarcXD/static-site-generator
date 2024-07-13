@@ -20,6 +20,10 @@ sample para
 ***italic bold here***
 **will newling gives us weird behaviors
 or will it**
+<break>
+**wil linebreak give issue with italics
+no it won't**
+what aboubt
 we got a list, engarde:  
 - *italic*  
 - **bold**  

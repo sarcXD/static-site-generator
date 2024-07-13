@@ -20,6 +20,7 @@ and you don't even know what you did incorrectly
 @todo:
 ---
 - md conversion
+  * text formatting to work with newline and linebreak
 	* link
 	* ul
 	* ol
@@ -27,6 +28,9 @@ and you don't even know what you did incorrectly
 - custom header
 - custom components
 @improvements:
+- treat parsing error as values and do not exit the programme upon getting an error
+  - continue parsing the string, checking for errors and notifying where there is an error
+  - warn about errors but silently treat failing markdown as simple text
 @inprogress:
 @done:
 - headings
@@ -57,327 +61,281 @@ type pathState struct {
 	dst_path string
 }
 
-// this will be a sort of a state machine
-// the elements at top have higher priority and
-// can contain elements that fall below. As an example
-// - A header is singular and no other element will have it
-// - When processing lists, they can have all the elements that fall below
-// note: this might be slightly confusing because of the MdHeader not containing any other element,
-// rest assured, that is the outlier here.
-const (
-	MdNone    = iota + 0
-	MdCustom  // custom component
-	MdHeader  // h1 to h4
-	MdElement // normal elements
-	// @note:
-	// ------ past this range we have the text buffer states
-	// MdFlushWrite: flush data to output file
-	// MdFlushError: handle error and flush the output from that (raw text) into the rawBuffer
-	// -----------------------------------------------------------
-	// SUBJECT TO CHANGE
-	// MdBufferFlush${OperatorName}: this error type points to error in a particular type of formatter
-	// and we need to handle each case usually differently.
-	MdFlushWrite
-	MdFlushError
-	MdBufferFlushHeader
-	MdBufferFlushItalicBold
-)
-
-// header parsing state
-const (
-	hStart = iota + 0
-	hText
-)
-
-// italic bold type
-const (
-	ibNone = iota + 0
-	ibItalic
-	ibBold
-	ibItalicBold
-)
-
-// italic bold parsing state
-const (
-	ibEleNone = iota + 0
-	ibEleStart
-	ibEleWriting
-	ibEleEnd
-	ibEleFinish
-)
-
-// maybe?
-// @note: (rawBuffer)
-// this buffer writes text as if it was just normal text. This is so that when the tag I am parsing is incorrect,
-// I have the raw data available so I can write it as is.
-
-type convState struct {
-	stateEval int
-	lineBegin bool
-	// == header stuff ==
-	headerBufferRaw    string // if parse error: flush this buffer to out_file
-	headerBufferParsed string // if ok: flush this buffer to out file
-	headerIndex        int
-	headerEval         int
-
-	writeBuffer string
-
-	paraBegin    bool
-	paraEnd      bool
-	paraSurround bool
-	paraActive   bool
-
-	isSpace     bool
-	isPageBreak bool
-
-	ibEval         int
-	ibIndexStart   int
-	ibIndexEnd     int
-	ibElementEval  int
-	ibBufferRaw    string
-	ibBufferParsed string
-
-	// parsing tracking
-	posline int
-	poscol  int
-}
-
-var hMap []string = []string{"h1", "h2", "h3", "h4", "h5", "h6"}
 var paraMap []string = []string{"<p>", "</p>"}
 var italicBoldMap [][]string = [][]string{{"<i>", "</i>"}, {"<b>", "</b>"}, {"<i><b>", "</b></i>"}}
 
-func process_md_file(file string) string {
-	var out_file string
-	var state convState = convState{stateEval: MdNone, posline: 0, poscol: 0}
-	out_file = "<article>\n"
-	state.lineBegin = true
-	for i := 0; i < len(file); i++ {
-		isSpace := false
-		lineBegin := false
-		ch := string(file[i])
-		switch ch {
-		case "#":
-			if state.stateEval == MdNone && state.lineBegin {
-				state.stateEval = MdHeader
-				state.headerBufferParsed = ""
-				state.headerBufferRaw = ""
-				state.headerIndex = 0
-				state.headerEval = hStart
-			} else if state.stateEval == MdHeader {
-				if state.headerEval == hStart {
-					if state.headerIndex >= len(hMap)-1 {
-						state.stateEval = MdBufferFlushHeader
-					} else {
-						state.headerIndex += 1
-					}
-				} else {
-					state.headerBufferParsed += ch
-				}
-			}
-			state.headerBufferRaw += ch
-		case "*":
-			if state.stateEval == MdNone || state.stateEval == MdElement {
-				if state.ibEval == ibNone {
-					state.stateEval = MdElement
-					state.ibEval = ibItalic
-					state.ibElementEval = ibEleStart
-					state.ibBufferRaw = ""
-					state.ibBufferParsed = ""
-					state.ibIndexStart = 1
-					state.ibIndexEnd = 1
-				} else if state.ibEval > ibNone {
-					if state.ibElementEval == ibEleStart {
-						if state.ibEval == ibItalic {
-							// make state bold
-							state.ibEval = ibBold
-							state.ibIndexStart++
-							state.ibIndexEnd++
-						} else if state.ibEval == ibBold {
-							// make state italic bold
-							state.ibEval = ibItalicBold
-							state.ibIndexStart++
-							state.ibIndexEnd++
-						} else {
-							// error case
-							state.stateEval = MdBufferFlushItalicBold
-						}
-					} else if state.ibElementEval > ibEleStart {
-						if state.ibEval == ibItalic {
-							state.ibElementEval = ibEleEnd
-							state.ibIndexEnd--
-						} else if state.ibEval == ibBold {
-							state.ibElementEval = ibEleEnd
-							state.ibIndexEnd--
-						} else if state.ibEval == ibItalicBold {
-							state.ibElementEval = ibEleEnd
-							state.ibIndexEnd--
-						} else {
-							state.stateEval = MdBufferFlushItalicBold
-						}
-						if state.ibIndexEnd == 0 {
-							state.ibEval = ibNone
-							state.ibElementEval = ibEleNone
-							state.ibBufferParsed += italicBoldMap[state.ibIndexStart-1][1]
-							state.writeBuffer += state.ibBufferParsed
-							state.stateEval = MdFlushWrite
-							if !state.paraActive {
-								state.paraBegin = true
-							}
-						}
-					}
-				}
-				state.ibBufferRaw += ch
-			} else {
-				state.writeBuffer += ch
-			}
-		case " ":
-			isSpace = true
-			if state.stateEval == MdHeader {
-				if state.headerEval == hStart {
-					state.headerEval = hText
-					state.headerBufferParsed += "<" + hMap[state.headerIndex] + ">"
-				} else {
-					state.headerBufferParsed += ch
-				}
-				state.headerBufferRaw += ch
-			} else {
-				if state.isSpace {
-					state.isPageBreak = true
-				}
-				if state.stateEval == MdElement {
-					if state.ibEval > ibNone {
-						if state.ibElementEval != ibEleWriting || state.isPageBreak {
-							state.stateEval = MdBufferFlushItalicBold
-						}
-						state.ibBufferRaw += ch
-						state.ibBufferParsed += ch
-					}
-				} else {
-					if !state.isPageBreak {
-						state.writeBuffer += ch
-						state.stateEval = MdFlushWrite
-					}
-				}
-			}
-		case "\n":
-			lineBegin = true
-			if state.stateEval == MdHeader {
-				if state.headerEval == hStart {
-					state.headerEval = MdBufferFlushHeader
-				} else {
-					state.headerBufferParsed += "</" + hMap[state.headerIndex] + ">"
-					state.headerBufferParsed += ch
-					state.stateEval = MdFlushWrite
-					state.writeBuffer += state.headerBufferParsed
+const (
+	TokenNone = iota + 0
+	TokenHeading
+	TokenFormat
+	TokenSpace
+	TokenNewline
+)
 
-					if state.paraActive {
-						state.paraEnd = true
-					}
+const (
+	ParseSuccess = iota + 0
+	ParseError
+)
+
+func Tokenize(ch rune) int {
+	operation := TokenNone
+	switch ch {
+	case '#':
+		operation = TokenHeading
+	case '*':
+		operation = TokenFormat
+	case ' ':
+		operation = TokenSpace
+	case '\n':
+		operation = TokenNewline
+	default:
+		operation = TokenNone
+	}
+
+	return operation
+}
+
+var hMap []string = []string{"h1", "h2", "h3", "h4", "h5", "h6"}
+
+const (
+	HmdNone = iota + 0
+	HmdToken
+	HmdText
+	HmdDone
+	HmdError
+)
+
+type ParsedToken struct {
+	str           string
+	pos           int
+	row           int
+	col           int
+	statusCode    int
+	statusMessage string
+}
+
+type paraState struct {
+	begin    bool
+	active   bool
+	surround bool
+	end      bool
+}
+
+type ParserState struct {
+	inpStr      string
+	outStr      string
+	currPos     int
+	writeBuffer string
+	isSpace     bool
+	isNewLine   bool
+	para        paraState
+}
+
+type MdParser interface {
+	printParseError(info ParsedToken) ParserState
+	writeToOutputStr() ParserState
+}
+
+func ParseHeading(str string, pos int) (res ParsedToken) {
+	res.str = ""
+	res.pos = pos
+	res.row = 1
+	res.col = 0
+
+	hInd := 0
+	hStatus := HmdNone
+	rawBuffer := ""
+	parsedBuffer := ""
+	i := pos
+	for i = pos; i < len(str); i++ {
+		res.col++
+		ch := rune(str[i])
+		switch ch {
+		case '#':
+			if hStatus < HmdText {
+				// we are going through the list of # to see what kind of heading
+				// this will be
+				hInd++
+				hStatus = HmdToken
+				if hInd > len(hMap) {
+					// we see more than 6 `#` characters. Those are invalid
+					res.str = rawBuffer
+					res.statusCode = ParseError
+					res.statusMessage = "headings can only have at max 6 `#` characters to declare them."
+					res.pos = i
+					hStatus = HmdError
 				}
-				state.headerBufferRaw += ch
-			} else if state.ibEval > ibNone {
-				state.stateEval = MdBufferFlushItalicBold
-				state.ibBufferRaw += ch
-				state.ibBufferParsed += ch
 			} else {
-				if state.lineBegin {
-					// we have a double line.
-					// close the paragraph
-					if state.paraActive {
-						state.paraEnd = true
-					}
-				} else {
-					state.writeBuffer += ch
-				}
+				// we are currently writing heading text and see another # character
+				// that will just be writting inside the heading as is
+				parsedBuffer += "#"
+			}
+			rawBuffer += "#"
+		case ' ':
+			if hStatus == HmdToken {
+				// we were going through the list of headings and found a ` `
+				// this means that text writing should begin now
+				hStatus = HmdText
+				parsedBuffer += "\n<" + hMap[hInd-1] + ">"
+			} else {
+				// in normal cases we will jsut copy the space
+				parsedBuffer += " "
+			}
+			rawBuffer += " "
+		case '\n':
+			// a newline marks the end of a header
+			// we will complete parsing and return
+			rawBuffer += "\n"
+			parsedBuffer += "</" + hMap[hInd-1] + ">\n"
+
+			res.str = parsedBuffer
+			res.statusCode = ParseSuccess
+			res.pos = i
+			hStatus = HmdDone
+			res.row++
+			res.col = 0
+		default:
+			// handle string
+			if hStatus == HmdToken {
+				// if we were going throuhg heading `#` characters and found a normal text character
+				// that means that the heading is invalid
+				res.str = rawBuffer
+				res.statusCode = ParseError
+				res.statusMessage = "An unsupported character was found directly after #. This is not valid"
+				hStatus = HmdError
+				// we want this to be re-evaluated after exiting since this will be treated as an independant character -
+				// and in the event that is some other markdown character that needs evaluation, this ensures that we
+				// do not skip it
+				res.pos = i - 1
+				break
+			} else {
+				// If the state is of writing, we will copy whatever character was found
+				parsedBuffer += string(ch)
+			}
+			rawBuffer += string(ch)
+		}
+		if hStatus >= HmdDone {
+			break
+		}
+	}
+	if hStatus < HmdDone {
+		res.str = rawBuffer
+		res.statusCode = ParseError
+		res.statusMessage = "Header was not terminated, as such it is invalid"
+		res.pos = i
+	}
+	return res
+}
+
+func ClampFloor(val int, floor int) int {
+	if val < floor {
+		return floor
+	}
+	return val
+}
+
+func ClampCeil(val int, ceil int) int {
+	if val > ceil {
+		return ceil
+	}
+	return val
+}
+
+func (state ParserState) printParseError(info ParsedToken) {
+	// print a detailed error message and exit the program
+	fmt.Printf("ERROR:: %s.\nValue: ...%s > %s... \nLocation => line: %d, col: %d\n",
+		info.statusMessage, 
+    state.inpStr[ClampFloor(state.currPos-15, 0):info.pos], 
+    state.inpStr[info.pos:ClampCeil(info.pos+15, len(state.inpStr)-1)],
+		info.row, info.col)
+}
+
+func (state *ParserState) writeToOutputStr() {
+	if state.para.end {
+		if state.para.active {
+			state.outStr += "</p>\n"
+			state.para.active = false
+			state.para.end = false
+		}
+	}
+	if state.para.begin {
+		state.outStr += "\n<p>"
+		state.para.active = true
+		state.para.begin = false
+	}
+	state.outStr += state.writeBuffer
+	if state.para.surround {
+		state.outStr += "</p>\n"
+		state.para.surround = false
+		state.para.active = false
+		state.para.begin = false
+		state.para.end = false
+	}
+}
+
+func ProcessMD(str string) string {
+	var state ParserState
+	state.inpStr = str
+	state.outStr = "<article>\n"
+	for state.currPos = 0; state.currPos < len(state.inpStr); state.currPos++ {
+    isNewLine := false
+    isSpace := false
+		ch := state.inpStr[state.currPos]
+		operation := Tokenize(rune(ch))
+		switch operation {
+		case TokenHeading:
+			parsedToken := ParseHeading(state.inpStr, state.currPos)
+			if parsedToken.statusCode != ParseSuccess {
+				state.printParseError(parsedToken)
+				os.Exit(0)
+			}
+			state.writeBuffer += parsedToken.str
+			state.currPos = parsedToken.pos
+			state.para.end = true
+		case TokenSpace:
+			if !state.para.active {
+				state.para.begin = true
+			}
+			if state.isSpace {
+				state.writeBuffer += "<br />"
+			} else {
+				isSpace = true
+				state.writeBuffer += " "
+			}
+		case TokenNewline:
+			if !state.para.active {
+				// this is for when a newline is written and we want to check if a new paragraph must begin
+				state.para.begin = true
+			}
+			if state.isNewLine {
+				// we expect that by the second newline we are already in a paragraph. that is the correct behavior
+				// normally, I would have an assertion here to check that para.active is true but this would suffice
+				// the rest I shall catch through tests
+				state.para.end = true
+			} else {
+				isNewLine = true
+				state.writeBuffer += "\n"
 			}
 		default:
-			if state.stateEval == MdHeader {
-				if state.headerEval == hStart {
-					state.stateEval = MdBufferFlushHeader
-				} else {
-					state.headerBufferParsed += ch
-				}
-				state.headerBufferRaw += ch
-			} else if state.stateEval == MdElement {
-				if state.ibEval > MdNone && state.ibElementEval == ibEleStart {
-					state.ibElementEval = ibEleWriting
-					state.ibBufferParsed += italicBoldMap[state.ibIndexStart-1][0]
-				}
-				state.ibBufferRaw += ch
-				state.ibBufferParsed += ch
-			}
-			if state.stateEval == MdNone {
-				if !state.paraActive {
-					state.paraBegin = true
-				}
-				state.writeBuffer += ch
-				state.stateEval = MdFlushWrite
+			state.writeBuffer += string(ch)
+			if !state.para.active {
+				state.para.begin = true
 			}
 		}
-		// Error checking is done first,
-		// any data to flush is sent to write buffer
-		if state.stateEval > MdFlushError {
-			switch state.stateEval {
-			case MdBufferFlushHeader:
-				state.writeBuffer += state.headerBufferRaw
-				state.stateEval = MdFlushWrite
-				if !state.paraActive {
-					state.paraBegin = true
-				}
-				log.Printf("Warning::Incorrect header at line %d, col %d", state.posline, state.poscol)
-			case MdBufferFlushItalicBold:
-				state.writeBuffer += state.ibBufferRaw
-				state.stateEval = MdFlushWrite
-				state.ibEval = ibNone
-				state.ibElementEval = ibEleNone
-				log.Printf("Warning::Incorrect ib format at line %d, col %d", state.posline, state.poscol)
-			}
-		}
-
-		// prefix write
-		if state.paraEnd {
-			out_file += "</p>\n"
-			state.paraEnd = false
-			state.paraActive = false
-		}
-		// Check to see if any data needs flushing
-		if state.stateEval == MdFlushWrite {
-			if state.paraBegin {
-				out_file += "\n<p>"
-				state.paraBegin = false
-				state.paraActive = true
-			}
-			out_file += state.writeBuffer
-			if state.paraSurround {
-				out_file += "</p>\n"
-				state.paraSurround = false
-				state.paraActive = false
-			}
-			state.stateEval = MdNone
-			state.writeBuffer = ""
-		}
-		if state.isPageBreak {
-			// postfix write
-			out_file += "<br />"
-			state.isPageBreak = false
-		}
-
-		state.lineBegin = lineBegin
-		state.isSpace = isSpace
-		if state.lineBegin {
-			state.posline += 1
-			state.poscol = 0
-		}
+		state.writeToOutputStr()
+		state.writeBuffer = ""
+    state.isSpace = isSpace
+    state.isNewLine = isNewLine
 	}
-	// some token closing checks need to be repeated
-	// in case the file ends without a newline/double newline
-	if state.paraActive {
-		out_file += "</p>\n"
-		state.paraActive = false
-	}
-	out_file += "\n</article>"
+	// incase something was being parsed as we reached end of string
+	// we will attempt to flush the write buffer to the output string
+  if state.para.active {
+    state.para.end = true
+    state.writeToOutputStr()
+  }
+	state.outStr += "\n</article>"
 
-	return out_file
+	return state.outStr
 }
 
 func process(src_path string, dst_path string) {
@@ -413,7 +371,7 @@ func process(src_path string, dst_path string) {
 		}
 		if strings.Contains(fname, ".md") {
 			// process_md_file
-			file_conv := process_md_file(string(file_bytes))
+			file_conv := ProcessMD(string(file_bytes))
 			file_bytes = []byte(file_conv)
 			fname_split := strings.Split(fname, ".")
 			fname = fname_split[0] + ".html"
